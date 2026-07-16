@@ -28,6 +28,9 @@ class PageElement {
   virtual void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset, bool foregroundBlack = true) = 0;
   virtual bool serialize(FsFile& file) = 0;
   virtual PageElementTag getTag() const = 0;  // Add type identification
+  // Vertical extent of this element, used to cull it against an active render
+  // clip range (e.g. a grayscale strip) without dispatching into render().
+  virtual int16_t getElementHeight(const GfxRenderer& renderer, int fontId) const = 0;
 };
 
 // a line from a block element
@@ -41,6 +44,7 @@ class PageLine final : public PageElement {
   void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset, bool foregroundBlack = true) override;
   bool serialize(FsFile& file) override;
   PageElementTag getTag() const override { return TAG_PageLine; }
+  int16_t getElementHeight(const GfxRenderer& renderer, int fontId) const override;
   static std::unique_ptr<PageLine> deserialize(FsFile& file);
 };
 
@@ -56,6 +60,7 @@ class PageImage final : public PageElement {
   PageElementTag getTag() const override { return TAG_PageImage; }
   static std::unique_ptr<PageImage> deserialize(FsFile& file);
   const ImageBlock& getImageBlock() const { return *imageBlock; }
+  int16_t getElementHeight(const GfxRenderer& renderer, int fontId) const override;
 };
 
 class PageHorizontalRule final : public PageElement {
@@ -70,6 +75,7 @@ class PageHorizontalRule final : public PageElement {
   bool serialize(FsFile& file) override;
   PageElementTag getTag() const override { return TAG_PageHorizontalRule; }
   static std::unique_ptr<PageHorizontalRule> deserialize(FsFile& file);
+  int16_t getElementHeight(const GfxRenderer& renderer, int fontId) const override;
 };
 
 struct TableFragmentCell {
@@ -117,6 +123,7 @@ class PageTableFragment final : public PageElement {
   PageElementTag getTag() const override { return TAG_PageTableFragment; }
   static std::unique_ptr<PageTableFragment> deserialize(FsFile& file);
   uint16_t getHeight() const;
+  int16_t getElementHeight(const GfxRenderer& renderer, int fontId) const override;
 };
 
 class Page {
@@ -160,9 +167,15 @@ class Page {
     publisherPageMarkers.push_back(marker);
   }
 
-  void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset, bool foregroundBlack = true) const;
-  void renderText(GfxRenderer& renderer, int fontId, int xOffset, int yOffset, bool foregroundBlack = true) const;
-  void renderImages(GfxRenderer& renderer, int fontId, int xOffset, int yOffset) const;
+  // clipTop/clipBottom restrict rendering to elements whose vertical extent overlaps
+  // [clipTop, clipBottom) (in the same xOffset/yOffset-relative coordinate space callers
+  // already draw in). Defaults cover the whole page, matching prior unclipped behavior.
+  void render(GfxRenderer& renderer, int fontId, int xOffset, int yOffset, bool foregroundBlack = true,
+              int clipTop = INT16_MIN, int clipBottom = INT16_MAX) const;
+  void renderText(GfxRenderer& renderer, int fontId, int xOffset, int yOffset, bool foregroundBlack = true,
+                  int clipTop = INT16_MIN, int clipBottom = INT16_MAX) const;
+  void renderImages(GfxRenderer& renderer, int fontId, int xOffset, int yOffset, int clipTop = INT16_MIN,
+                    int clipBottom = INT16_MAX) const;
   bool serialize(FsFile& file) const;
   static std::unique_ptr<Page> deserialize(FsFile& file);
 

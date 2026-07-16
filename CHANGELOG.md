@@ -1,3 +1,10 @@
+## [Unreleased]
+
+### Changed
+
+- EPUB page turns no longer force a full SD-card sync on every single turn; reading progress now saves with a short debounce instead, and still flushes immediately when you leave the reader or go to sleep, so page turns feel snappier without risking your saved place.
+- Grayscale anti-aliased page turns now skip page content that falls outside the current display strip instead of fully re-rendering it, reducing redundant work on every anti-aliased page turn with no change in what's drawn.
+
 ## [v1.4.0] - 2026-07-10
 
 ### Added

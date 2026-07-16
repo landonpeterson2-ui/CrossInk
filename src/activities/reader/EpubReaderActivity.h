@@ -69,6 +69,14 @@ class EpubReaderActivity final : public Activity {
   unsigned long lastPageTurnTime = 0UL;
   unsigned long pageTurnDuration = 0UL;
   unsigned long pageShownAtMs = 0UL;
+  // Debounces the on-disk progress.bin write (fsync + backup rotation) so it isn't
+  // paid on every single page turn. See saveProgressDebounced().
+  static constexpr unsigned long PROGRESS_SAVE_DEBOUNCE_MS = 5000UL;
+  unsigned long lastProgressSaveMs = 0UL;
+  bool progressSaveDue = false;
+  int pendingProgressSpineIndex = 0;
+  int pendingProgressPage = 0;
+  int pendingProgressPageCount = 0;
   bool paceSampleWarmupPending = true;
   uint32_t sessionPaceSampleSeconds = 0;
   uint16_t sessionPaceSampleCount = 0;
@@ -165,6 +173,10 @@ class EpubReaderActivity final : public Activity {
   // No-op when pagination is unchanged (plain resume).
   bool applyDeferredReposition();
   bool saveProgress(int spineIndex, int currentPage, int pageCount);
+  // Same as saveProgress(), but skips the actual SD write (and its fsync) if one
+  // already happened within PROGRESS_SAVE_DEBOUNCE_MS. The skipped position is
+  // remembered and flushed from onExit().
+  void saveProgressDebounced(int spineIndex, int currentPage, int pageCount);
   void cacheCurrentSectionPosition();
   void pauseReadingPaceTimer(const char* reason = "unknown");
   void resumeReadingPaceTimer(const char* reason = "unknown");

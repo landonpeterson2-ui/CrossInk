@@ -593,9 +593,9 @@ bool runTiledGrayscalePass(GfxRenderer& renderer, const Page& page, const int fo
       renderer.beginStripTarget(scratch.get(), y, rows);
       renderer.clearScreen(0x00);
       if (needsTextGrayscale) {
-        page.render(renderer, fontId, marginLeft, marginTop, foregroundBlack);
+        page.render(renderer, fontId, marginLeft, marginTop, foregroundBlack, y, y + rows);
       } else {
-        page.renderImages(renderer, fontId, marginLeft, marginTop);
+        page.renderImages(renderer, fontId, marginLeft, marginTop, y, y + rows);
       }
       renderer.endStripTarget();
       renderer.writeGrayscalePlaneStrip(lsbPlane, scratch.get(), y, rows);
@@ -1847,6 +1847,15 @@ void EpubReaderActivity::onExit() {
   if (footnoteDepth > 0 && epub) {
     const SavedPosition& origin = savedPositions[0];
     saveProgress(origin.spineIndex, origin.pageNumber, 0);
+    progressSaveDue = false;
+  } else if (progressSaveDue && epub) {
+    // Flush the debounced progress write that render() deferred, so exiting the
+    // reader (including going to sleep, which also routes through onExit()) never
+    // leaves progress.bin stale.
+    if (!saveProgress(pendingProgressSpineIndex, pendingProgressPage, pendingProgressPageCount)) {
+      LOG_ERR("ERS", "Failed to flush pending progress on exit");
+    }
+    progressSaveDue = false;
   }
 
   BOOKMARKS.unload();
@@ -4107,9 +4116,7 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     LOG_DBG("ERS", "Rendered page in %dms", millis() - start);
   }
   if (!activeFootnotePreview) {
-    if (!saveProgress(currentSpineIndex, section->currentPage, section->pageCount)) {
-      pendingSyncSaveError = true;
-    }
+    saveProgressDebounced(currentSpineIndex, section->currentPage, section->pageCount);
     queueCompletionPromptIfNeeded();
   }
 
@@ -4191,6 +4198,27 @@ bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
     return true;
   }
   return EpubReaderUtils::saveProgress(*epub, spineIndex, currentPage, pageCount);
+}
+
+void EpubReaderActivity::saveProgressDebounced(int spineIndex, int currentPage, int pageCount) {
+  pendingProgressSpineIndex = spineIndex;
+  pendingProgressPage = currentPage;
+  pendingProgressPageCount = pageCount;
+
+  const unsigned long now = millis();
+  if (lastProgressSaveMs != 0UL && now - lastProgressSaveMs < PROGRESS_SAVE_DEBOUNCE_MS) {
+    // Defer the SD write (and its fsync) until the debounce window elapses or the
+    // activity exits (see onExit()), so quick successive page turns don't each pay
+    // for a hard SD flush.
+    progressSaveDue = true;
+    return;
+  }
+
+  if (!saveProgress(spineIndex, currentPage, pageCount)) {
+    pendingSyncSaveError = true;
+  }
+  lastProgressSaveMs = now;
+  progressSaveDue = false;
 }
 
 void EpubReaderActivity::cacheCurrentSectionPosition() {

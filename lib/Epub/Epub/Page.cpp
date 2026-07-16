@@ -17,11 +17,15 @@ static_assert(PageTableFragment::MAX_SERIALIZED_ROWS == MAX_TABLE_ROWS_PER_FRAGM
 template <typename Predicate>
 void renderFilteredPageElements(const std::vector<std::shared_ptr<PageElement>>& elements, GfxRenderer& renderer,
                                 const int fontId, const int xOffset, const int yOffset, const bool foregroundBlack,
-                                Predicate&& predicate) {
+                                const int clipTop, const int clipBottom, Predicate&& predicate) {
   for (const auto& element : elements) {
-    if (predicate(*element)) {
-      element->render(renderer, fontId, xOffset, yOffset, foregroundBlack);
-    }
+    if (!predicate(*element)) continue;
+    // Skip elements that can't possibly draw any pixels into the active clip range
+    // (e.g. one grayscale strip), instead of paying for a full render() dispatch.
+    const int elementTop = element->yPos + yOffset;
+    const int elementBottom = elementTop + element->getElementHeight(renderer, fontId);
+    if (elementBottom <= clipTop || elementTop >= clipBottom) continue;
+    element->render(renderer, fontId, xOffset, yOffset, foregroundBlack);
   }
 }
 
@@ -30,6 +34,10 @@ void renderFilteredPageElements(const std::vector<std::shared_ptr<PageElement>>&
 void PageLine::render(GfxRenderer& renderer, const int fontId, const int xOffset, const int yOffset,
                       const bool foregroundBlack) {
   block->render(renderer, fontId, xPos + xOffset, yPos + yOffset, foregroundBlack);
+}
+
+int16_t PageLine::getElementHeight(const GfxRenderer& renderer, const int fontId) const {
+  return static_cast<int16_t>(renderer.getLineHeight(fontId));
 }
 
 bool PageLine::serialize(FsFile& file) {
@@ -69,6 +77,12 @@ void PageImage::render(GfxRenderer& renderer, const int fontId, const int xOffse
   (void)foregroundBlack;
   // Images don't use fontId or text rendering
   imageBlock->render(renderer, xPos + xOffset, yPos + yOffset);
+}
+
+int16_t PageImage::getElementHeight(const GfxRenderer& renderer, const int fontId) const {
+  (void)renderer;
+  (void)fontId;
+  return imageBlock->getHeight();
 }
 
 bool PageImage::serialize(FsFile& file) {
@@ -112,6 +126,12 @@ void PageHorizontalRule::render(GfxRenderer& renderer, const int fontId, const i
 
   renderer.drawLine(xPos + xOffset, yPos + yOffset, xPos + xOffset + width - 1, yPos + yOffset, thickness,
                     foregroundBlack);
+}
+
+int16_t PageHorizontalRule::getElementHeight(const GfxRenderer& renderer, const int fontId) const {
+  (void)renderer;
+  (void)fontId;
+  return static_cast<int16_t>(thickness);
 }
 
 bool PageHorizontalRule::serialize(FsFile& file) {
@@ -239,6 +259,12 @@ uint16_t PageTableFragment::getHeight() const {
   return total;
 }
 
+int16_t PageTableFragment::getElementHeight(const GfxRenderer& renderer, const int fontId) const {
+  (void)renderer;
+  (void)fontId;
+  return static_cast<int16_t>(getHeight());
+}
+
 void PageTableFragment::render(GfxRenderer& renderer, const int fontId, const int xOffset, const int yOffset,
                                const bool foregroundBlack) {
   if (columnCount == 0 || rows.empty() || width < 2) {
@@ -348,19 +374,20 @@ std::unique_ptr<PageTableFragment> PageTableFragment::deserialize(FsFile& file) 
 }
 
 void Page::render(GfxRenderer& renderer, const int fontId, const int xOffset, const int yOffset,
-                  const bool foregroundBlack) const {
-  renderFilteredPageElements(elements, renderer, fontId, xOffset, yOffset, foregroundBlack,
+                  const bool foregroundBlack, const int clipTop, const int clipBottom) const {
+  renderFilteredPageElements(elements, renderer, fontId, xOffset, yOffset, foregroundBlack, clipTop, clipBottom,
                              [](const PageElement&) { return true; });
 }
 
 void Page::renderText(GfxRenderer& renderer, const int fontId, const int xOffset, const int yOffset,
-                      const bool foregroundBlack) const {
-  renderFilteredPageElements(elements, renderer, fontId, xOffset, yOffset, foregroundBlack,
+                      const bool foregroundBlack, const int clipTop, const int clipBottom) const {
+  renderFilteredPageElements(elements, renderer, fontId, xOffset, yOffset, foregroundBlack, clipTop, clipBottom,
                              [](const PageElement& element) { return element.getTag() != TAG_PageImage; });
 }
 
-void Page::renderImages(GfxRenderer& renderer, const int fontId, const int xOffset, const int yOffset) const {
-  renderFilteredPageElements(elements, renderer, fontId, xOffset, yOffset, true,
+void Page::renderImages(GfxRenderer& renderer, const int fontId, const int xOffset, const int yOffset,
+                        const int clipTop, const int clipBottom) const {
+  renderFilteredPageElements(elements, renderer, fontId, xOffset, yOffset, true, clipTop, clipBottom,
                              [](const PageElement& element) { return element.getTag() == TAG_PageImage; });
 }
 

@@ -12,6 +12,7 @@ Keep this file focused on repo-specific gotchas that are worth reusing in future
   - JPEGDEC stub always fails; `JPEGDEC fallback: open failed (err=-1)` is expected in simulator.
   - `esp_deep_sleep_start()` is a no-op in simulator.
   - `HalStorage` uses POSIX file access under `./fs_` and allows multiple readers, unlike real hardware.
+  - As of 2026-07-16, `pio run -e simulator` fails: `src/activities/network/WifiSelectionActivity.cpp` calls the real Arduino-ESP32 3-arg `WiFi.disconnect(wifioff, eraseap, timeoutMs)`, but the simulator's stub `WiFi.h` (in `crosspoint-simulator`) only declares the 2-arg form. `pio run -e default` (real firmware) is unaffected. Fix belongs in `crosspoint-simulator`.
 
 ## Real Hardware / Storage
 
