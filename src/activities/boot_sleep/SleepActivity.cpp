@@ -253,28 +253,39 @@ BookReadingStats loadBookStatsForPath(const std::string& path) {
   return BookReadingStats::load(cachePath);
 }
 
-std::string loadChapterTitleForPath(const std::string& path) {
-  if (!FsHelpers::hasEpubExtension(path)) {
-    return {};
-  }
+// Loads the EPUB's metadata and progress once and derives both the reading
+// percentage and the current chapter title. The dashboard sleep screen needs
+// both; loading them through separate helpers opened and parsed the same book
+// twice on every sleep entry. Percent semantics match RecentBookProgress::
+// loadPercent (-1 when unknown).
+void loadEpubSleepContext(const std::string& path, float& progressPercent, std::string& chapterTitle) {
+  progressPercent = -1.0f;
+  chapterTitle.clear();
 
   Epub epub(path, "/.crosspoint");
   if (!epub.load(false, true)) {
-    return {};
+    return;
   }
 
   EpubReaderUtils::Progress progress;
   if (!EpubReaderUtils::loadProgress(epub, progress, "SLP")) {
-    return {};
+    return;
+  }
+
+  if (progress.hasPageCount) {
+    if (progress.pageCount <= 0) {
+      progressPercent = 0.0f;
+    } else {
+      const float chapterProgress =
+          static_cast<float>(progress.pageNumber + 1) / static_cast<float>(progress.pageCount);
+      progressPercent = std::clamp(epub.calculateProgress(progress.spineIndex, chapterProgress) * 100.0f, 0.0f, 100.0f);
+    }
   }
 
   const auto spineItem = epub.getSpineItem(progress.spineIndex);
-  if (spineItem.tocIndex < 0) {
-    return {};
+  if (spineItem.tocIndex >= 0) {
+    chapterTitle = epub.getTocItem(spineItem.tocIndex).title;
   }
-
-  const auto tocItem = epub.getTocItem(spineItem.tocIndex);
-  return tocItem.title;
 }
 
 enum class OverlayDrawResult : uint8_t { NotFound, Drawn, Failed };
@@ -741,8 +752,14 @@ void SleepActivity::renderDashboardSleepScreen() const {
 
   const BookReadingStats bookStats = loadBookStatsForPath(path);
   const GlobalReadingStats globalStats = GlobalReadingStats::load();
-  const float progressPercent = RecentBookProgress::loadPercent(book);
-  const std::string chapterTitle = loadChapterTitleForPath(path);
+  float progressPercent = -1.0f;
+  std::string chapterTitle;
+  if (FsHelpers::hasEpubExtension(path)) {
+    loadEpubSleepContext(path, progressPercent, chapterTitle);
+  } else {
+    // Non-EPUB books have no chapter title here; percent comes from the shared helper.
+    progressPercent = RecentBookProgress::loadPercent(book);
+  }
   DashboardTheme theme;
   theme.drawSleepScreen(renderer, book, &bookStats, &globalStats, progressPercent, chapterTitle.c_str(),
                         sleepCoverFilterInvertsGeneratedScreen());

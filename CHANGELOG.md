@@ -10,6 +10,7 @@
 - Settings, app state, and recent-books are now read from the SD card in a single bulk read instead of one byte at a time, speeding up boot with no change in behavior.
 - Waking from sleep is faster: the USB-enumeration delay is skipped when no USB cable was connected at sleep, the recovery-mode button check now overlaps display initialization instead of dead-waiting half a second, and the reader defers its state/recent-books writes until after the first page is shown.
 - Every sleep screen now gets Quick Resume's fast wake, not just the Quick Resume mode: the sleep frame is saved for all sleep-screen styles (Dashboard, Cover, etc.), so waking skips the boot splash and repaints with a fast partial refresh while keeping your chosen sleep screen.
+- The Dashboard sleep screen no longer opens and parses the book twice while composing; reading progress and the chapter title now come from a single load, making sleep entry quicker and cheaper on battery.
 
 ## [v1.4.0] - 2026-07-10
 
