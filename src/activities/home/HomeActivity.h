@@ -28,6 +28,12 @@ class HomeActivity final : public Activity {
   bool recentsLoading = false;
   bool recentsLoaded = false;
   bool firstRenderDone = false;
+  // Last time a button was active on Home; gates idle cover generation.
+  unsigned long lastHomeInputMs = 0;
+  // One generation attempt per book per Home visit: ensureReusableCoverPath
+  // re-derives cleared cover paths on every scan, so a cleared path cannot act
+  // as the retried-marker the way it does in the single-pass bulk loader.
+  std::array<char, kMaxCachedBooks> homeCoverGenAttempted{};
   bool hasReadingStats = false;
   bool hasBookmarks = false;
   bool hasClippings = false;
@@ -102,6 +108,10 @@ class HomeActivity final : public Activity {
   void loadRecentBooks(int maxBooks);
   void loadAllBookStats();
   void loadRecentCovers(int coverHeight);
+  // Idle-time replacement for loadRecentCovers on non-carousel themes: generates
+  // at most one missing home thumbnail per call from loop(), so Home stays
+  // responsive while covers pop in. Sets recentsLoaded once nothing is missing.
+  void maybeGenerateRecentCover();
 
  public:
   explicit HomeActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,

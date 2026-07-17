@@ -857,8 +857,111 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
   }
 }
 
+void HomeActivity::maybeGenerateRecentCover() {
+  // Idle-time, one-cover-per-call replacement for the blocking loadRecentCovers
+  // pass on non-carousel themes. Runs from loop(): Home paints immediately with
+  // placeholder tiles, then thumbnails pop in as they're generated, and button
+  // input stays responsive between covers. The carousel theme keeps the original
+  // bulk path because its frame cache re-renders are coupled to cover resolution.
+  static constexpr unsigned long COVER_GEN_IDLE_MS = 1200;
+  static constexpr uint32_t COVER_GEN_MIN_FREE_HEAP = 90000;
+  static constexpr uint32_t COVER_GEN_MIN_MAX_ALLOC = 60000;
+
+  if (recentsLoaded || !firstRenderDone) return;
+  if (static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme) == CrossPointSettings::UI_THEME::LYRA_CAROUSEL) {
+    return;
+  }
+  if (isAnyFrontButtonPressed(mappedInput)) {
+    lastHomeInputMs = millis();
+    return;
+  }
+  if (lastHomeInputMs != 0 && millis() - lastHomeInputMs < COVER_GEN_IDLE_MS) return;
+  if (ESP.getFreeHeap() < COVER_GEN_MIN_FREE_HEAP || ESP.getMaxAllocHeap() < COVER_GEN_MIN_MAX_ALLOC) return;
+
+  const int coverHeight = UITheme::getInstance().getMetrics().homeCoverHeight;
+  const bool isMinimal = isMinimalTheme();
+  const bool isDashboard = isDashboardTheme();
+
+  for (size_t bookIdx = 0; bookIdx < recentBooks.size(); ++bookIdx) {
+    RecentBook& book = recentBooks[bookIdx];
+    if (bookIdx >= homeCoverGenAttempted.size() || homeCoverGenAttempted[bookIdx]) continue;
+    if (!Storage.exists(book.path.c_str())) continue;
+    ensureReusableCoverPath(book);
+    if (book.coverBmpPath.empty()) continue;
+
+    const bool supportsExactHomeThumb = FsHelpers::hasEpubExtension(book.path) || FsHelpers::hasXtcExtension(book.path);
+    const bool useDashboardThumb = isDashboard && supportsExactHomeThumb;
+    const bool useMinimalThumb = isMinimal && supportsExactHomeThumb;
+    const bool useExactHomeThumb = useDashboardThumb || useMinimalThumb;
+    const std::string coverPath =
+        useDashboardThumb ? dashboardHomeCoverPath(book, coverHeight)
+                          : (useMinimalThumb ? minimalHomeCoverPath(book, coverHeight)
+                                             : UITheme::getCoverThumbPath(book.coverBmpPath, coverHeight));
+    if (!coverPath.empty() && Storage.exists(coverPath.c_str())) continue;
+
+    homeCoverGenAttempted[bookIdx] = 1;
+
+    // Thumbnail generation may need a 32 KB contiguous inflate buffer; the Home
+    // cover snapshot is only a redraw cache, so release it first.
+    if (coverBuffer) {
+      freeCoverBuffer();
+      coverRendered = false;
+    }
+    auto zipInflateScratch = ScratchWorkspace::acquire(InflateReader::STREAMING_DICT_SIZE, "Home EPUB thumbnails");
+
+    const unsigned long startMs = millis();
+    bool success = false;
+    if (FsHelpers::hasEpubExtension(book.path)) {
+      Epub epub(book.path, "/.crosspoint");
+      if (!epub.load(true, true)) {
+        LOG_ERR("HOME", "failed to load EPUB cache for thumb generation: %s", book.path.c_str());
+      } else {
+        success = useDashboardThumb
+                      ? epub.generateAdaptiveThumbBmp(dashboardHomeCoverWidth(coverHeight),
+                                                      dashboardHomeCoverHeight(coverHeight), &renderer,
+                                                      SETTINGS.getReaderFontId())
+                      : (useExactHomeThumb
+                             ? epub.generateAdaptiveThumbBmp(minimalHomeCoverWidth(coverHeight),
+                                                             minimalHomeCoverHeight(coverHeight), &renderer,
+                                                             SETTINGS.getReaderFontId())
+                             : epub.generateThumbBmp(0, coverHeight, &renderer, SETTINGS.getReaderFontId()));
+      }
+    } else if (FsHelpers::hasXtcExtension(book.path)) {
+      Xtc xtc(book.path, "/.crosspoint");
+      if (xtc.load()) {
+        success = useDashboardThumb
+                      ? xtc.generateThumbBmp(static_cast<uint16_t>(dashboardHomeCoverWidth(coverHeight)),
+                                             static_cast<uint16_t>(dashboardHomeCoverHeight(coverHeight)))
+                      : (useExactHomeThumb
+                             ? xtc.generateThumbBmp(static_cast<uint16_t>(minimalHomeCoverWidth(coverHeight)),
+                                                    static_cast<uint16_t>(minimalHomeCoverHeight(coverHeight)))
+                             : xtc.generateThumbBmp(coverHeight));
+      }
+    } else {
+      continue;  // no thumbnail pipeline for this type
+    }
+
+    if (success) {
+      LOG_INF("HOME", "Generated home cover for '%s' in %lums", book.title.c_str(), millis() - startMs);
+    } else {
+      // Same as the bulk path: clear the cover reference so this book renders as
+      // a text tile and isn't retried every pass.
+      updateRecentBookCoverPath(book, "");
+      book.coverBmpPath = "";
+    }
+    coverRendered = false;
+    requestUpdate();
+    return;  // one cover per call; the next loop() pass picks up the rest
+  }
+
+  recentsLoaded = true;
+}
+
 void HomeActivity::onEnter() {
   Activity::onEnter();
+
+  // Give the user a quiet window after arriving before idle cover generation may start.
+  lastHomeInputMs = millis();
 
   hasOpdsServers = OPDS_STORE.hasServers();
   const bool isCarouselTheme =
@@ -1397,6 +1500,8 @@ bool HomeActivity::preRenderCarouselFrames(bool showProgressPopup) {
 }
 
 void HomeActivity::loop() {
+  maybeGenerateRecentCover();
+
   if (usesMinimalHomeInteraction()) {
     const int pressedFrontButton = mappedInput.getPressedFrontButton();
     const int releasedFrontButton = mappedInput.getReleasedFrontButton();
@@ -1722,10 +1827,7 @@ void HomeActivity::render(RenderLock&&) {
       return;
     }
 
-    if (!recentsLoaded && !recentsLoading) {
-      recentsLoading = true;
-      loadRecentCovers(metrics.homeCoverHeight);
-    }
+    // Missing covers are generated one at a time from loop() (maybeGenerateRecentCover).
     return;
   }
 
@@ -1826,7 +1928,9 @@ void HomeActivity::render(RenderLock&&) {
     return;
   }
 
-  if (!recentsLoaded && !recentsLoading) {
+  // Carousel keeps the bulk cover pass: its frame-cache warmup below depends on
+  // covers being resolved first. Other themes generate covers lazily from loop().
+  if (isCarouselTheme && !recentsLoaded && !recentsLoading) {
     recentsLoading = true;
     loadRecentCovers(metrics.homeCoverHeight);
   }
