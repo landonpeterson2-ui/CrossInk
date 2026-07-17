@@ -370,13 +370,14 @@ bool CrossPointSettings::loadFromFile() {
   auto loadJsonSettings = [this](const char* path, bool migrateToCurrentPath) -> JsonLoadStatus {
     if (!Storage.exists(path)) return JsonLoadStatus::MissingOrEmpty;
 
-    String json = Storage.readFile(path);
-    if (!json.isEmpty()) {
+    std::unique_ptr<char[]> json;
+    size_t jsonSize = 0;
+    if (Storage.readFileExact("CPS", path, json, jsonSize) && jsonSize > 0) {
       bool resave = false;
       bool result;
       {
         std::lock_guard<std::mutex> lock(_mutex);
-        result = JsonSettingsIO::loadSettings(*this, json.c_str(), &resave);
+        result = JsonSettingsIO::loadSettings(*this, json.get(), &resave);
       }
       if (result && (resave || migrateToCurrentPath)) {
         if (saveToFile()) {

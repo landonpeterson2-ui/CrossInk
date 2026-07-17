@@ -19,12 +19,13 @@ bool PersistableStoreBase::readDocFromFile(const char* path, JsonDocument& doc) 
   if (!Storage.exists(path)) {
     return false;  // Expected on first boot — not an error.
   }
-  String json = Storage.readFile(path);
-  if (json.isEmpty()) {
+  std::unique_ptr<char[]> json;
+  size_t jsonSize = 0;
+  if (!Storage.readFileExact("PERSIST", path, json, jsonSize) || jsonSize == 0) {
     LOG_ERR("PERSIST", "Failed to read %s (empty)", path);
     return false;
   }
-  auto error = deserializeJson(doc, json);
+  auto error = deserializeJson(doc, json.get(), jsonSize);
   if (error) {
     LOG_ERR("PERSIST", "JSON parse error in %s: %s", path, error.c_str());
     return false;

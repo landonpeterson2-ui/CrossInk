@@ -18,6 +18,13 @@ class HalStorage {
   std::vector<String> listFiles(const char* path = "/", int maxFiles = 200);
   // Read the entire file at `path` into a String. Returns empty string on failure.
   String readFile(const char* path);
+  // Reads the entire file at `path` into a heap buffer sized exactly to its
+  // contents plus a null terminator, in a single bulk read (unlike readFile(),
+  // which appends one byte at a time and reallocates repeatedly as it grows).
+  // Returns false if the file is missing or a read/allocation error occurs;
+  // on success, outBuffer owns the allocation and outSize is the number of
+  // bytes read (excluding the null terminator).
+  bool readFileExact(const char* moduleName, const char* path, std::unique_ptr<char[]>& outBuffer, size_t& outSize);
   // Low-memory helpers:
   // Stream the file contents to a `Print` (e.g. `Serial`, or any `Print`-derived object).
   // Returns true on success, false on failure.

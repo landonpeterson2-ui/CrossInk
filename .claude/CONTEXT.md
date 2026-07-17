@@ -20,6 +20,9 @@ Keep this file focused on repo-specific gotchas that are worth reusing in future
 
 ## Rendering / Reader Pipeline
 
+- `runTiledGrayscalePass` strips are **physical panel rows**, not logical page rows. In portrait (the default), logical Y maps to framebuffer columns, so every text line physically spans every strip — element-level Y culling against strip bounds is a wrong-axis bug (caused a real AA regression, reverted 2026-07-17). Per-glyph strip culling already exists and is orientation-aware: `GfxRenderer::glyphIntersectsStrip` rotates coords before comparing.
+- BW framebuffer screenshots (`ScreenshotUtil`) do **not** capture the grayscale AA planes — those stream to the controller via `writeGrayscalePlaneStrip`. Screenshot-diff verification proves nothing about anti-aliasing changes.
+
 - `lib/Epub/Epub/Page.cpp`: images must render only in `GfxRenderer::BW`; grayscale passes are text anti-aliasing passes only.
 - Kindle EPUBs may contain paired high-res and old-Kindle fallback images. `ChapterHtmlSlimParser` should skip `<img>` nodes with `data-AmznRemoved-M8` to avoid duplicate stacked images.
 - After image/layout pipeline changes that affect cached EPUB output, clear the affected `.crosspoint/epub_<hash>/` cache if behavior looks stale.

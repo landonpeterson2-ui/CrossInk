@@ -593,9 +593,9 @@ bool runTiledGrayscalePass(GfxRenderer& renderer, const Page& page, const int fo
       renderer.beginStripTarget(scratch.get(), y, rows);
       renderer.clearScreen(0x00);
       if (needsTextGrayscale) {
-        page.render(renderer, fontId, marginLeft, marginTop, foregroundBlack, y, y + rows);
+        page.render(renderer, fontId, marginLeft, marginTop, foregroundBlack);
       } else {
-        page.renderImages(renderer, fontId, marginLeft, marginTop, y, y + rows);
+        page.renderImages(renderer, fontId, marginLeft, marginTop);
       }
       renderer.endStripTarget();
       renderer.writeGrayscalePlaneStrip(lsbPlane, scratch.get(), y, rows);
@@ -1712,6 +1712,7 @@ void EpubReaderActivity::endGlobalSettingsEditForBookReader(void* ctx) {
 
 void EpubReaderActivity::onEnter() {
   Activity::onEnter();
+  const unsigned long enterStartMs = millis();
   pageLoadRetryCount = 0;
 
   if (!epub) {
@@ -1790,10 +1791,13 @@ void EpubReaderActivity::onEnter() {
 
   initializeCompletionPromptTrigger();
 
-  // Save current epub as last opened epub and add to recent books
+  // Save current epub as last opened epub and add to recent books. Only the RAM
+  // field is set here; the SD writes are deferred to the end of the first render
+  // (see pendingOpenStatePersist) so they don't delay the first page paint.
   APP_STATE.openEpubPath = epub->getPath();
-  APP_STATE.saveToFile();
-  RECENT_BOOKS.addOrUpdateBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), epub->getThumbBmpPath());
+  pendingOpenStatePersist = true;
+
+  LOG_INF("ERS", "Reader onEnter done in %lums", millis() - enterStartMs);
 
   // Trigger first update
   requestUpdate();
@@ -1973,6 +1977,8 @@ void EpubReaderActivity::loop() {
         });
     return;
   }
+
+  maybePrefetchNextSection();
 
   if (pendingBookmarkFeedback) {
     const bool timedOut = (millis() - bookmarkFeedbackShowTime) >= 1000UL;
@@ -4116,6 +4122,12 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     LOG_DBG("ERS", "Rendered page in %dms", millis() - start);
   }
   if (!activeFootnotePreview) {
+    if (pendingOpenStatePersist && epub) {
+      // First successful render: flush the open-book state writes deferred from onEnter().
+      pendingOpenStatePersist = false;
+      APP_STATE.saveToFile();
+      RECENT_BOOKS.addOrUpdateBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), epub->getThumbBmpPath());
+    }
     saveProgressDebounced(currentSpineIndex, section->currentPage, section->pageCount);
     queueCompletionPromptIfNeeded();
   }
@@ -4198,6 +4210,66 @@ bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
     return true;
   }
   return EpubReaderUtils::saveProgress(*epub, spineIndex, currentPage, pageCount);
+}
+
+void EpubReaderActivity::maybePrefetchNextSection() {
+  // Runs from loop() while the user reads. Deliberately conservative: primary
+  // render profile only (Balanced/Light books keep building at the boundary),
+  // no popup or display writes, one attempt per spine, and only with generous
+  // heap headroom — layout transiently needs ~50-60KB on this hardware.
+  static constexpr unsigned long PREFETCH_IDLE_MS = 3000;
+  static constexpr uint32_t PREFETCH_MIN_FREE_HEAP = 100000;
+  static constexpr uint32_t PREFETCH_MIN_MAX_ALLOC = 75000;
+
+  if (!epub || !section || activeFootnotePreview || automaticPageTurnActive) return;
+  if (pendingBookmarkFeedback || pendingCompletedFeedback || pendingTiltPageTurnFeedback || pendingRenderModeToast ||
+      pendingSafeModeToast) {
+    // Feedback toasts dismiss on a ~1s timer in loop(); don't block their dismissal.
+    return;
+  }
+  if (normalizeRenderMode(SETTINGS.epubRenderMode) != EpubRenderMode::CrossInkDefault) return;
+  const int nextSpine = currentSpineIndex + 1;
+  if (nextSpine >= epub->getSpineItemsCount()) return;
+  if (lastPrefetchAttemptSpine == nextSpine) return;
+  if (pageShownAtMs == 0 || millis() - pageShownAtMs < PREFETCH_IDLE_MS) return;
+  if (lastPageTurnTime != 0 && millis() - lastPageTurnTime < PREFETCH_IDLE_MS) return;
+  if (ESP.getFreeHeap() < PREFETCH_MIN_FREE_HEAP || ESP.getMaxAllocHeap() < PREFETCH_MIN_MAX_ALLOC) return;
+
+  lastPrefetchAttemptSpine = nextSpine;
+
+  const unsigned long startMs = millis();
+  // Serialize against the render task: section layout measures text through the
+  // same renderer/font-cache state render() touches.
+  RenderLock lock(*this);
+  const ReaderViewportLayout layout = computeReaderViewportLayout(renderer, automaticPageTurnActive);
+  const int fontId = SETTINGS.getReaderFontId();
+  const char* cacheSuffix = sectionCacheSuffixForRenderMode(EpubRenderMode::CrossInkDefault);
+  auto prefetch = makeUniqueNoThrow<Section>(epub, nextSpine, renderer, cacheSuffix);
+  if (!prefetch) {
+    LOG_ERR("ERS", "Prefetch: failed to allocate section for spine %d", nextSpine);
+    return;
+  }
+  if (prefetch->loadSectionFile(fontId, SETTINGS.getReaderLineCompression(), SETTINGS.extraParagraphSpacing,
+                                SETTINGS.forceParagraphIndents, SETTINGS.paragraphAlignment, layout.viewportWidth,
+                                layout.viewportHeight, SETTINGS.hyphenationEnabled, SETTINGS.embeddedStyle,
+                                SETTINGS.imageRendering, SETTINGS.bionicReadingEnabled, SETTINGS.guideReadingEnabled,
+                                EpubRenderMode::CrossInkDefault)) {
+    return;  // already cached with compatible parameters
+  }
+  bool layoutAborted = false;
+  const bool built = prefetch->createSectionFile(
+      fontId, SETTINGS.getReaderLineCompression(), SETTINGS.extraParagraphSpacing, SETTINGS.forceParagraphIndents,
+      SETTINGS.paragraphAlignment, layout.viewportWidth, layout.viewportHeight, SETTINGS.hyphenationEnabled,
+      SETTINGS.embeddedStyle, SETTINGS.imageRendering, SETTINGS.bionicReadingEnabled, SETTINGS.guideReadingEnabled,
+      nullptr, nullptr, &layoutAborted, EpubRenderMode::CrossInkDefault);
+  if (built) {
+    LOG_INF("ERS", "Prefetched next chapter: spine=%d pages=%u in %lums", nextSpine, prefetch->pageCount,
+            millis() - startMs);
+  } else {
+    // Non-fatal: the boundary page turn will build in the foreground with the
+    // full fallback ladder, exactly as it does today.
+    LOG_DBG("ERS", "Prefetch skipped: spine=%d lowMemAbort=%d", nextSpine, layoutAborted ? 1 : 0);
+  }
 }
 
 void EpubReaderActivity::saveProgressDebounced(int spineIndex, int currentPage, int pageCount) {

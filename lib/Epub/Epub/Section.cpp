@@ -232,7 +232,8 @@ bool Section::loadSectionFile(const int fontId, const float lineCompression, con
         bionicReadingEnabled != fileBionicReadingEnabled || guideReadingEnabled != fileGuideReadingEnabled ||
         static_cast<uint8_t>(renderMode) != fileRenderMode) {
       file.close();
-      LOG_ERR("SCT", "Deserialization failed: Parameters do not match");
+      // Expected whenever font/layout settings changed since this cache was written.
+      LOG_DBG("SCT", "Section cache stale: parameters do not match, rebuilding");
       clearCache();
       return false;
     }
@@ -282,6 +283,7 @@ bool Section::createSectionFile(const int fontId, const float lineCompression, c
   const auto tmpSectionPath = filePath + ".tmp";
   pageCount = 0;
   if (layoutAbortedForLowMemory) *layoutAbortedForLowMemory = false;
+  const unsigned long buildStartMs = millis();
   const bool effectiveBionicReadingEnabled = bionicReadingEnabled;
   const bool effectiveGuideReadingEnabled = guideReadingEnabled;
   LOG_DBG("SCT",
@@ -590,8 +592,8 @@ bool Section::createSectionFile(const int fontId, const float lineCompression, c
   if (cssParser) {
     cssParser->clear();
   }
-  LOG_DBG("SCT", "Create section done: spine=%d pages=%u free=%u maxAlloc=%u", spineIndex, pageCount, ESP.getFreeHeap(),
-          ESP.getMaxAllocHeap());
+  LOG_INF("SCT", "Create section done: spine=%d pages=%u in %lums (htmlCached=%d, free=%u maxAlloc=%u)", spineIndex,
+          pageCount, millis() - buildStartMs, reusedHtml ? 1 : 0, ESP.getFreeHeap(), ESP.getMaxAllocHeap());
   return true;
 }
 

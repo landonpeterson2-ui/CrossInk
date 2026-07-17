@@ -77,6 +77,14 @@ class EpubReaderActivity final : public Activity {
   int pendingProgressSpineIndex = 0;
   int pendingProgressPage = 0;
   int pendingProgressPageCount = 0;
+  // Set in onEnter(): the APP_STATE save and recent-books update are deferred to
+  // the end of the first successful render so their SD writes don't delay the
+  // first page paint. The in-RAM APP_STATE fields are updated immediately, so a
+  // sleep before first render still persists the open book via enterDeepSleep().
+  bool pendingOpenStatePersist = false;
+  // Last spine index the idle prefetcher attempted (success or not); one attempt
+  // per spine so a failing chapter doesn't retry every loop iteration.
+  int lastPrefetchAttemptSpine = -1;
   bool paceSampleWarmupPending = true;
   uint32_t sessionPaceSampleSeconds = 0;
   uint16_t sessionPaceSampleCount = 0;
@@ -177,6 +185,9 @@ class EpubReaderActivity final : public Activity {
   // already happened within PROGRESS_SAVE_DEBOUNCE_MS. The skipped position is
   // remembered and flushed from onExit().
   void saveProgressDebounced(int spineIndex, int currentPage, int pageCount);
+  // Idle-time background build of the next chapter's section cache, so the
+  // chapter-boundary page turn doesn't stall on indexing.
+  void maybePrefetchNextSection();
   void cacheCurrentSectionPosition();
   void pauseReadingPaceTimer(const char* reason = "unknown");
   void resumeReadingPaceTimer(const char* reason = "unknown");

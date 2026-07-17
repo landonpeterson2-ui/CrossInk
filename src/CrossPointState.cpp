@@ -47,10 +47,11 @@ bool CrossPointState::saveToFile() const {
 bool CrossPointState::loadFromFile() {
   // Try JSON first
   if (Storage.exists(STATE_FILE_JSON)) {
-    String json = Storage.readFile(STATE_FILE_JSON);
-    if (!json.isEmpty()) {
+    std::unique_ptr<char[]> json;
+    size_t jsonSize = 0;
+    if (Storage.readFileExact("CPS", STATE_FILE_JSON, json, jsonSize) && jsonSize > 0) {
       std::lock_guard<std::mutex> lock(_mutex);
-      return JsonSettingsIO::loadState(*this, json.c_str());
+      return JsonSettingsIO::loadState(*this, json.get());
     }
   }
 

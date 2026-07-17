@@ -141,6 +141,42 @@ std::vector<String> HalStorage::listFiles(const char* path, int maxFiles) {
 
 String HalStorage::readFile(const char* path) { HAL_STORAGE_WRAPPED_CALL(readFile, path); }
 
+bool HalStorage::readFileExact(const char* moduleName, const char* path, std::unique_ptr<char[]>& outBuffer,
+                               size_t& outSize) {
+  HalFile file;
+  if (!openFileForRead(moduleName, path, file)) {
+    return false;
+  }
+
+  const size_t fileSize = file.fileSize();
+  auto buffer = makeUniqueNoThrow<char[]>(fileSize + 1);
+  if (!buffer) {
+    LOG_ERR(moduleName, "OOM: readFileExact buffer for %s (%u bytes, %u free)", path,
+            static_cast<unsigned>(fileSize + 1), ESP.getFreeHeap());
+    file.close();
+    return false;
+  }
+
+  size_t totalRead = 0;
+  while (totalRead < fileSize) {
+    const int r = file.read(buffer.get() + totalRead, fileSize - totalRead);
+    if (r <= 0) break;
+    totalRead += static_cast<size_t>(r);
+  }
+  file.close();
+
+  if (totalRead != fileSize) {
+    LOG_ERR(moduleName, "Short read on %s: got %u of %u bytes", path, static_cast<unsigned>(totalRead),
+            static_cast<unsigned>(fileSize));
+    return false;
+  }
+
+  buffer[fileSize] = '\0';
+  outBuffer = std::move(buffer);
+  outSize = fileSize;
+  return true;
+}
+
 bool HalStorage::readFileToStream(const char* path, Print& out, size_t chunkSize) {
   HAL_STORAGE_WRAPPED_CALL(readFileToStream, path, out, chunkSize);
 }

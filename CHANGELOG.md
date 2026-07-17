@@ -1,9 +1,15 @@
 ## [Unreleased]
 
+### Added
+
+- The EPUB reader now pre-indexes the next chapter in the background while you read, so page turns across chapter boundaries no longer stall on the "Indexing" step. Prefetch only runs after a few seconds of idle reading, with plenty of free memory, and for the default render mode; otherwise chapters index at the boundary exactly as before.
+
 ### Changed
 
 - EPUB page turns no longer force a full SD-card sync on every single turn; reading progress now saves with a short debounce instead, and still flushes immediately when you leave the reader or go to sleep, so page turns feel snappier without risking your saved place.
-- Grayscale anti-aliased page turns now skip page content that falls outside the current display strip instead of fully re-rendering it, reducing redundant work on every anti-aliased page turn with no change in what's drawn.
+- Settings, app state, and recent-books are now read from the SD card in a single bulk read instead of one byte at a time, speeding up boot with no change in behavior.
+- Waking from sleep is faster: the USB-enumeration delay is skipped when no USB cable was connected at sleep, the recovery-mode button check now overlaps display initialization instead of dead-waiting half a second, and the reader defers its state/recent-books writes until after the first page is shown.
+- Every sleep screen now gets Quick Resume's fast wake, not just the Quick Resume mode: the sleep frame is saved for all sleep-screen styles (Dashboard, Cover, etc.), so waking skips the boot splash and repaints with a fast partial refresh while keeping your chosen sleep screen.
 
 ## [v1.4.0] - 2026-07-10
 

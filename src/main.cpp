@@ -329,6 +329,12 @@ const char* wakeupRouteName(const HalGPIO::WakeupReason reason) {
 RTC_NOINIT_ATTR uint32_t silentRebootMagic;
 RTC_NOINIT_ATTR uint32_t silentRebootTarget;
 constexpr uint32_t SILENT_REBOOT_MAGIC = 0xC1EAB007;
+// Written before deep sleep so the next wake can skip the USB-enumeration delay
+// when nothing was plugged in. Garbage on cold boot fails the magic check, which
+// safely defaults to delaying. USB plugged in during sleep triggers its own
+// cold boot (AfterUSBPower route), so the flag cannot go stale that way.
+RTC_NOINIT_ATTR uint32_t usbAtSleepMagic;
+constexpr uint32_t USB_DISCONNECTED_AT_SLEEP_MAGIC = 0x0FFB007E;
 constexpr uint32_t SILENT_REBOOT_TARGET_HOME = 0;
 constexpr uint32_t SILENT_REBOOT_TARGET_READER = 1;
 
@@ -573,7 +579,10 @@ void enterDeepSleep(bool fromTimeout) {
       SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
       (fromTimeout &&
        SETTINGS.quickResumeSleepScreen == CrossPointSettings::QUICK_RESUME_SLEEP_SCREEN::QUICK_RESUME_AFTER_TIMEOUT);
-  APP_STATE.showBootScreen = !isQuickResumeSleep;
+  // Every controlled sleep saves its final frame below, so every wake can take the
+  // quick-resume boot path (restored frame + seamless display init) regardless of
+  // which sleep screen is shown. The splash remains for cold boots only.
+  APP_STATE.showBootScreen = false;
 
   APP_STATE.saveToFile();
 
@@ -582,9 +591,10 @@ void enterDeepSleep(bool fromTimeout) {
   deepSleepInProgress = true;
   activityManager.goToSleep(fromTimeout);
 
-  if (isQuickResumeSleep) {
-    saveSleepFrameBuffer();
-  } else {
+  // Save the just-painted sleep frame for all modes: the next wake restores it so
+  // its first paint is a partial refresh over what the panel already shows.
+  saveSleepFrameBuffer();
+  if (!isQuickResumeSleep) {
     delay(POST_SLEEP_SCREEN_SETTLE_MS);
   }
 
@@ -597,6 +607,7 @@ void enterDeepSleep(bool fromTimeout) {
 
   putTiltSensorToSleepForDeepSleep();
   display.deepSleep();
+  usbAtSleepMagic = gpio.isUsbConnected() ? 0 : USB_DISCONNECTED_AT_SLEEP_MAGIC;
   LOG_DBG("MAIN", "Entering deep sleep");
 
   powerManager.startDeepSleep(gpio);
@@ -688,13 +699,23 @@ void setup() {
   const esp_reset_reason_t rawResetReason = esp_reset_reason();
   const esp_sleep_wakeup_cause_t rawWakeupCause = esp_sleep_get_wakeup_cause();
 
+  // Read-and-clear before anything else: decides whether the USB-enumeration
+  // delay below can be skipped on this wake.
+  const bool usbWasDisconnectedAtSleep = (usbAtSleepMagic == USB_DISCONNECTED_AT_SLEEP_MAGIC);
+  usbAtSleepMagic = 0;
+
 #ifdef ENABLE_SERIAL_LOG
   // Earliest possible Serial setup. The 250 ms stall before begin() lets the
   // USB Serial/JTAG peripheral finish power-on and lets the host complete USB
   // enumeration before we touch the CDC state — otherwise cold boot races
   // and the host has to be physically replugged for logs to flow. Warm reboot
   // worked without the delay because USB was already enumerated.
-  delay(250);
+  // Skipped when the previous deep sleep recorded no USB connection: with no
+  // host there is nothing to enumerate, and the worst case of a stale flag is
+  // logs needing a replug, never a functional fault.
+  if (!usbWasDisconnectedAtSleep) {
+    delay(250);
+  }
   // Web Serial sends file data in 256-byte chunks and waits for a 1-byte ACK.
   // HWCDC defaults to a 256-byte RX queue, which is fine for logs but too small
   // for chunked file transfer.
@@ -707,6 +728,11 @@ void setup() {
 #endif
 
   HalSystem::begin();
+  // Milestone timestamps are captured locally and replayed in one summary line at
+  // the end of setup(): on wake-from-sleep the USB serial link is still
+  // re-enumerating during early boot, so lines printed here are lost to the host.
+  const unsigned long msSerial = millis() - t1;
+  LOG_INF("BOOT", "t+%lums: serial+system up", msSerial);
   LOG_INF("BOOT", "Reset diagnostic: reset=%d(%s) sleepWake=%d(%s)", static_cast<int>(rawResetReason),
           resetReasonName(rawResetReason), static_cast<int>(rawWakeupCause), wakeupCauseName(rawWakeupCause));
 
@@ -722,6 +748,8 @@ void setup() {
   powerManager.begin();
   halTiltSensor.begin();
   halClock.begin();
+  const unsigned long msPeriph = millis() - t1;
+  LOG_INF("BOOT", "t+%lums: peripherals up", msPeriph);
 
   LOG_INF("MAIN", "Hardware detect: %s", gpio.deviceIsX3() ? "X3" : "X4");
   LOG_INF("BOOT", "Post-GPIO diagnostic: device=%s usb=%d silentReboot=%d silentTarget=%lu",
@@ -738,6 +766,8 @@ void setup() {
   }
 
   HalSystem::checkPanic();
+  const unsigned long msSd = millis() - t1;
+  LOG_INF("BOOT", "t+%lums: SD up", msSd);
 
   SETTINGS.loadFromFile();
   Storage.installDateTimeCallback(&SETTINGS.clockUtcOffsetQ);
@@ -748,6 +778,8 @@ void setup() {
   OPDS_STORE.loadFromFile();
   UITheme::getInstance().reload();
   ButtonNavigator::setMappedInputManager(mappedInputManager);
+  const unsigned long msStores = millis() - t1;
+  LOG_INF("BOOT", "t+%lums: settings/state/store loads done", msStores);
 
   // Check wake duration before the remaining file loads so the user does not
   // have to hold the power button across all of the SD reads below.
@@ -778,21 +810,14 @@ void setup() {
   // Recovery firmware mode: hold left side button (BTN_UP) together with the power button at
   // boot to skip directly to the SD-card firmware update screen. Useful on devices where USB
   // flashing has been locked down (e.g. recent X3 firmware).
-  bool recoveryFirmwareMode = false;
-  if (wakeupReason == HalGPIO::WakeupReason::PowerButton) {
-    // Refresh the cached button state a few times — isPressed() needs ~half a second to settle
-    // after boot per the HalGPIO contract. Use a millis-based deadline so we always wait the full
-    // settle window even if the loop body takes longer than expected on slow boots.
-    const unsigned long settleStart = millis();
-    while (millis() - settleStart < 500) {
-      gpio.update();
-      delay(10);
-    }
-    if (gpio.isPressed(HalGPIO::BTN_UP)) {
-      recoveryFirmwareMode = true;
-      LOG_INF("MAIN", "Recovery firmware mode (UP + POWER held at boot)");
-    }
-  }
+  // isPressed() needs ~half a second after boot to report reliably (HalGPIO contract), but
+  // dead-waiting for it here costs every power-button wake ~500ms. Record the deadline now and
+  // run the actual check after the first boot paint below, so the settle window overlaps
+  // display init and painting instead of blocking.
+  const bool checkRecoveryMode = (wakeupReason == HalGPIO::WakeupReason::PowerButton);
+  const unsigned long recoverySettleDeadline = millis() + 500;
+  const unsigned long msWakeChecks = millis() - t1;
+  LOG_INF("BOOT", "t+%lums: wake-route checks done", msWakeChecks);
 
   // First serial output only here to avoid timing inconsistencies for power button press duration verification
   LOG_DBG("MAIN", "Starting CrossInk version " CROSSINK_VERSION);
@@ -806,6 +831,8 @@ void setup() {
                                                         : BootResume::Splash;
 
   setupDisplayAndFonts(resume != BootResume::Splash);
+  const unsigned long msDisplay = millis() - t1;
+  LOG_INF("BOOT", "t+%lums: display+fonts up", msDisplay);
 
   switch (resume) {
     case BootResume::Silent:
@@ -835,6 +862,25 @@ void setup() {
     case BootResume::Splash:
       activityManager.goToBoot();
       break;
+  }
+
+  // Deferred recovery-mode check (deadline recorded before display init above). The boot
+  // paint that just ran usually covers the whole settle window, so the residual wait is
+  // normally zero. Two spaced update() calls then propagate a held button into
+  // isPressed()-visible state per the InputManager debounce contract.
+  bool recoveryFirmwareMode = false;
+  if (checkRecoveryMode) {
+    while (millis() < recoverySettleDeadline) {
+      gpio.update();
+      delay(10);
+    }
+    gpio.update();
+    delay(10);
+    gpio.update();
+    if (gpio.isPressed(HalGPIO::BTN_UP)) {
+      recoveryFirmwareMode = true;
+      LOG_INF("MAIN", "Recovery firmware mode (UP + POWER held at boot)");
+    }
   }
 
   if (recoveryFirmwareMode) {
@@ -884,7 +930,16 @@ void setup() {
   }
 
   // Ensure we're not still holding the power button before leaving setup
+  const unsigned long msRouted = millis() - t1;
+  LOG_INF("BOOT", "t+%lums: activity routed, waiting for power release", msRouted);
   waitForPowerRelease();
+  // Single-line replay of all milestones. This is the authoritative record on
+  // wake-from-sleep, when the per-milestone lines above never reach the host.
+  LOG_INF("BOOT",
+          "Summary(ms): serial=%lu periph=%lu sd=%lu stores=%lu wakeChecks=%lu display=%lu routed=%lu done=%lu "
+          "wake=%d resume=%d",
+          msSerial, msPeriph, msSd, msStores, msWakeChecks, msDisplay, msRouted, millis() - t1,
+          static_cast<int>(wakeupReason), static_cast<int>(resume));
   allowSleepAt = millis() + 2000;
 }
 
