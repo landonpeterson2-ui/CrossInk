@@ -12,6 +12,7 @@
 - Every sleep screen now gets Quick Resume's fast wake, not just the Quick Resume mode: the sleep frame is saved for all sleep-screen styles (Dashboard, Cover, etc.), so waking skips the boot splash and repaints with a fast partial refresh while keeping your chosen sleep screen.
 - The Dashboard sleep screen no longer opens and parses the book twice while composing; reading progress and the chapter title now come from a single load, making sleep entry quicker and cheaper on battery.
 - Missing recent-book cover thumbnails on the Home screen are now generated one at a time in the background instead of all at once behind a blocking "Loading" popup; Home appears immediately with placeholder tiles and covers pop in as they finish, with navigation staying responsive throughout. (The Lyra Carousel theme keeps its original loading flow.)
+- Opening an EPUB is faster on books with many chapters: locating the 99% completion-prompt position now binary-searches the chapter size table instead of reading every chapter's entry from the SD card (~190ms saved on a 107-chapter book).
 
 ## [v1.4.0] - 2026-07-10
 

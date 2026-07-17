@@ -1528,17 +1528,22 @@ void EpubReaderActivity::initializeCompletionPromptTrigger() {
     targetSize = bookSize - 1;
   }
 
-  int targetSpineIndex = spineCount - 1;
-  size_t prevCumulative = 0;
-
-  for (int i = 0; i < spineCount; i++) {
-    const size_t cumulative = epub->getCumulativeSpineItemSize(i);
-    if (targetSize <= cumulative) {
-      targetSpineIndex = i;
-      prevCumulative = (i > 0) ? epub->getCumulativeSpineItemSize(i - 1) : 0;
-      break;
+  // Binary-search the first spine whose cumulative size reaches targetSize.
+  // Cumulative sizes are monotonic, and each getCumulativeSpineItemSize() call
+  // costs SD seeks (spine entries stay on-disk by design) — the previous linear
+  // scan spent ~190ms of every reader open walking a 100+ chapter book.
+  int lo = 0;
+  int hi = spineCount - 1;
+  while (lo < hi) {
+    const int mid = lo + (hi - lo) / 2;
+    if (targetSize <= epub->getCumulativeSpineItemSize(mid)) {
+      hi = mid;
+    } else {
+      lo = mid + 1;
     }
   }
+  const int targetSpineIndex = lo;
+  const size_t prevCumulative = (lo > 0) ? epub->getCumulativeSpineItemSize(lo - 1) : 0;
 
   const size_t cumulative = epub->getCumulativeSpineItemSize(targetSpineIndex);
   const size_t spineSize = (cumulative > prevCumulative) ? (cumulative - prevCumulative) : 0;
@@ -1723,6 +1728,7 @@ void EpubReaderActivity::onEnter() {
   epub->setupCacheDir();
   loadBookReaderSettings();
   sdFontSystem.ensureLoaded(renderer);
+  const unsigned long msSettings = millis() - enterStartMs;
 
   // Configure screen orientation based on settings
   // NOTE: This affects layout math and must be applied before any render calls.
@@ -1733,6 +1739,7 @@ void EpubReaderActivity::onEnter() {
 
   BOOKMARKS.loadForBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), "epub");
   CLIPPINGS.loadForBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), "epub");
+  const unsigned long msMarks = millis() - enterStartMs;
 
   if (APP_STATE.pendingBookmarkSpine != UINT16_MAX && APP_STATE.pendingBookmarkProgress >= 0.0f) {
     // Resume from a bookmark selected on the Home screen
@@ -1772,6 +1779,8 @@ void EpubReaderActivity::onEnter() {
     }
   }
 
+  const unsigned long msProgress = millis() - enterStartMs;
+
   // Load reading stats and record session start time.
   // Session count and reading time are committed on exit once thresholds are met.
   stats = BookReadingStats::load(epub->getCachePath());
@@ -1783,11 +1792,14 @@ void EpubReaderActivity::onEnter() {
           static_cast<unsigned long>(stats.totalReadingSeconds), static_cast<unsigned long>(stats.totalPagesTurned),
           stats.avgSecondsPerForwardPage, stats.paceSampleCount, static_cast<unsigned long>(cumulativeAvgSeconds));
 #endif
+  const unsigned long msStats = millis() - enterStartMs;
   armReadingPaceWarmup("reader_open");
   sessionReadingSeconds = 0;
   hasSessionStartLocalDateTime = getCurrentLocalReadingStatsDateTime(sessionStartLocalDateTime);
+  const unsigned long msRtc = millis() - enterStartMs;
 
   globalStats = GlobalReadingStats::load();
+  const unsigned long msGlobalStats = millis() - enterStartMs;
 
   initializeCompletionPromptTrigger();
 
@@ -1797,7 +1809,10 @@ void EpubReaderActivity::onEnter() {
   APP_STATE.openEpubPath = epub->getPath();
   pendingOpenStatePersist = true;
 
-  LOG_INF("ERS", "Reader onEnter done in %lums", millis() - enterStartMs);
+  // Cumulative milestones since onEnter start, replayed in one line (same style
+  // as the BOOT summary) so the remaining cost is attributable phase by phase.
+  LOG_INF("ERS", "Reader onEnter(ms): settings=%lu marks=%lu progress=%lu stats=%lu rtc=%lu gstats=%lu total=%lu",
+          msSettings, msMarks, msProgress, msStats, msRtc, msGlobalStats, millis() - enterStartMs);
 
   // Trigger first update
   requestUpdate();
